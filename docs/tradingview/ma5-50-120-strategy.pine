@@ -1,0 +1,131 @@
+//@version=5
+strategy("MA5/50/120 三均线趋势策略", overlay=true, initial_capital=100000, pyramiding=1,
+     commission_type=strategy.commission.percent, commission_value=0.05)
+
+// =============================
+// 输入参数
+// =============================
+fastLen = input.int(5,  "快线长度 (MA5)",  minval=1)
+midLen  = input.int(50, "中线长度 (MA50)", minval=1)
+slowLen = input.int(120,"慢线长度 (MA120)",minval=1)
+
+maType  = input.string("SMA", "均线类型", options=["SMA","EMA","WMA","RMA"])
+useShorts = input.bool(true, "允许做空")
+
+entryLogic = input.string("Cross + Trend", "入场逻辑",
+     options=["Cross + Trend","Alignment + Price > Fast","Cross Only"],
+     tooltip="Cross + Trend: 快线与中线金叉，且中线在慢线上方\nAlignment + Price > Fast: 多头排列且收盘上破快线\nCross Only: 仅快中线金叉/死叉")
+
+// 风险控制
+riskMode     = input.string("ATR", "止盈/止损模式", options=["ATR","Percent"])
+atrLen       = input.int(14, "ATR周期")
+atrSLMult    = input.float(3.0, "ATR止损倍数", step=0.1)
+atrTPMult    = input.float(6.0, "ATR止盈倍数", step=0.1)
+slPct        = input.float(2.0, "止损百分比(%)", minval=0.1, step=0.1)
+tpPct        = input.float(4.0, "止盈百分比(%)", minval=0.1, step=0.1)
+
+useTrailing  = input.bool(false, "使用移动止损")
+trailMode    = input.string("ATR", "移动止损模式", options=["ATR","Percent"])
+trailATRMult = input.float(2.0, "移动止损 ATR 倍数", step=0.1)
+trailPct     = input.float(2.5, "移动止损 百分比(%)", minval=0.1, step=0.1)
+
+// 回测时间过滤
+useDateFilter = input.bool(false, "使用回测时间范围过滤")
+startTime     = input.time(timestamp(2020, 01, 01, 00, 00), "开始时间")
+endTime       = input.time(timestamp(2099, 12, 31, 23, 59), "结束时间")
+
+inDateRange = not useDateFilter or (time >= startTime and time <= endTime)
+
+// =============================
+// 均线函数
+// =============================
+ma(src, len, type) =>
+    switch type
+        "SMA" => ta.sma(src, len)
+        "EMA" => ta.ema(src, len)
+        "WMA" => ta.wma(src, len)
+        => ta.rma(src, len) // RMA
+
+fast = ma(close, fastLen, maType)
+mid  = ma(close, midLen,  maType)
+slow = ma(close, slowLen, maType)
+
+// =============================
+// 趋势判定
+// =============================
+bullTrend = fast > mid and mid > slow
+bearTrend = fast < mid and mid < slow
+
+crossUp   = ta.crossover(fast, mid)
+crossDown = ta.crossunder(fast, mid)
+
+longSignal  = switch entryLogic
+    "Cross + Trend" => crossUp and mid > slow
+    "Alignment + Price > Fast" => bullTrend and ta.crossover(close, fast)
+    => crossUp
+
+shortSignal = switch entryLogic
+    "Cross + Trend" => crossDown and mid < slow
+    "Alignment + Price > Fast" => bearTrend and ta.crossunder(close, fast)
+    => crossDown
+
+// =============================
+// 风险/出场价格计算
+// =============================
+atrVal = ta.atr(atrLen)
+
+longSL  = riskMode == "ATR" ? strategy.position_avg_price - atrVal * atrSLMult : strategy.position_avg_price * (1.0 - slPct/100.0)
+longTP  = riskMode == "ATR" ? strategy.position_avg_price + atrVal * atrTPMult : strategy.position_avg_price * (1.0 + tpPct/100.0)
+shortSL = riskMode == "ATR" ? strategy.position_avg_price + atrVal * atrSLMult : strategy.position_avg_price * (1.0 + slPct/100.0)
+shortTP = riskMode == "ATR" ? strategy.position_avg_price - atrVal * atrTPMult : strategy.position_avg_price * (1.0 - tpPct/100.0)
+
+// 移动止损（price units）
+trailOffsetATR  = atrVal * trailATRMult
+trailOffsetPct  = strategy.position_avg_price * trailPct/100.0
+trailOffset     = trailMode == "ATR" ? trailOffsetATR : trailOffsetPct
+
+// =============================
+// 下单与出场
+// =============================
+if inDateRange and longSignal
+    strategy.entry("Long", strategy.long)
+
+if inDateRange and useShorts and shortSignal
+    strategy.entry("Short", strategy.short)
+
+// 条件离场：均线反向
+longCloseCond  = ta.crossunder(fast, mid) or mid < slow
+shortCloseCond = ta.crossover(fast, mid)  or mid > slow
+
+strategy.close("Long",  when=longCloseCond)
+strategy.close("Short", when=shortCloseCond)
+
+// 止盈止损/移动止损
+if useTrailing
+    // 只能设置追踪止损，不可同时设置固定止盈/止损
+    strategy.exit("L-Exit", from_entry="Long",  trail_points=trailOffset)
+    strategy.exit("S-Exit", from_entry="Short", trail_points=trailOffset)
+else
+    strategy.exit("L-Exit", from_entry="Long",  stop=longSL,  limit=longTP)
+    strategy.exit("S-Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+
+// =============================
+// 画图
+// =============================
+col = bullTrend ? color.new(color.green, 0) : bearTrend ? color.new(color.red, 0) : color.new(color.gray, 0)
+plot(fast, color=color.new(color.teal,  0), title="MA5(快)",  linewidth=2)
+plot(mid,  color=color.new(color.orange,0), title="MA50(中)", linewidth=2)
+plot(slow, color=color.new(color.blue,  0), title="MA120(慢)",linewidth=2)
+
+plotshape(longSignal,  title="做多信号", style=shape.triangleup,   color=color.new(color.green, 0), location=location.belowbar, size=size.tiny, text="Long")
+plotshape(shortSignal, title="做空信号", style=shape.triangledown, color=color.new(color.red,   0), location=location.abovebar, size=size.tiny, text="Short")
+
+bgcolor(color.new(col, 95))
+
+// =============================
+// 警报
+// =============================
+alertcondition(longSignal,  title="MA5/50/120 做多信号", message="多头信号触发：快线突破中线且趋势多头或价格上破快线")
+alertcondition(shortSignal, title="MA5/50/120 做空信号", message="空头信号触发：快线跌破中线且趋势空头或价格跌破快线")
+
+// 免责声明：本脚本仅用于学习与回测示例，不构成任何投资建议。
